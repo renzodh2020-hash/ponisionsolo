@@ -1,0 +1,35 @@
+CROP ROUTE 1.3.0 — CAMBIOS QUE NECESITA TU GITHUB
+
+Si tu repositorio todavía contiene el Crop Route original (1.0.0),
+reemplaza estos 7 archivos, conservando exactamente sus rutas:
+
+1. src/main/java/com/nakero/croproute/CropRouteClient.java
+2. src/main/java/com/nakero/croproute/RouteManager.java
+3. src/main/java/com/nakero/croproute/RouteSelectorScreen.java
+4. src/main/resources/assets/crop_route/lang/es_es.json
+5. src/main/resources/assets/crop_route/lang/en_us.json
+6. gradle.properties
+7. .github/workflows/build.yml
+
+CREA también este archivo nuevo (es obligatorio para el contador):
+8. src/main/java/com/nakero/croproute/LapProgressTracker.java
+
+NO CAMBIES estos archivos, porque no necesitan cambios para el mod:
+- build.gradle y settings.gradle
+- RoutePoint.java, RouteData.java, RouteStore.java y RouteNameScreen.java
+- fabric.mod.json y LICENSE
+- Tu archivo personal .minecraft/config/crop-route/routes.json
+
+OPCIONAL, solo para tener documentación actualizada:
+- README.md
+- GITHUB-PASOS.txt
+
+IMPORTANTE:
+- La carpeta .github es una carpeta oculta en algunos sistemas.
+- Al crear LapProgressTracker.java usa el nombre exacto y la carpeta de los demás Java.
+- Si ya actualizaste a 1.2.1 antes, también reemplaza los tres Java indicados;
+  no omitas LapProgressTracker.java ni gradle.properties ni el build.yml.
+- Version actual: 1.3.0, Minecraft 1.20.4 Fabric.
+- Después de subir archivos ve a Actions > Build Crop Route.
+- El ZIP NO es el mod jugable. El .jar se genera al compilar en GitHub.
+- Se validó con Java 17 y simuladores; falta comprobar Fabric real y el juego.

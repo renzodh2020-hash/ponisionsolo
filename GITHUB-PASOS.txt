@@ -1,0 +1,11 @@
+CROP ROUTE 1.3.0 - COMPILAR EN GITHUB
+
+1. Abre ARCHIVOS-PARA-GITHUB.txt: indica qué archivos crear o reemplazar.
+2. Conserva todas las demás carpetas y archivos del repositorio.
+3. Abre la pestaña Actions > Build Crop Route y espera la compilación o selecciona Run workflow.
+4. Descarga el artefacto CropRoute-1.20.4 y extrae crop-route-1.3.0.jar.
+5. Quita el .jar anterior de .minecraft/mods antes de colocar la nueva versión.
+6. No hace falta subir ni reemplazar el routes.json que tienes en tu Minecraft.
+7. Haz una copia de seguridad y prueba el funcionamiento supervisado.
+
+Este proyecto ZIP contiene código fuente, no el .jar compilado.
