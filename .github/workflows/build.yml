@@ -33,5 +33,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: CropRoute-1.20.4
-          path: build/libs/crop-route-1.3.0.jar
+          path: build/libs/crop-route-1.4.0.jar
           if-no-files-found: error
