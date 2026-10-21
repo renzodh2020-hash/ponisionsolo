@@ -3,7 +3,9 @@ package com.nakero.croproute;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.text.Text;
@@ -18,7 +20,7 @@ public class CropRouteClient implements ClientModInitializer {
 
     /*
      * ============================================================
-     * CROP ROUTE V2
+     * CROP ROUTE 1.4.0
      * ============================================================
      *
      * - Varias rutas guardadas.
@@ -120,53 +122,35 @@ public class CropRouteClient implements ClientModInitializer {
     private static double progressT = 0.0D;
 
     /*
-     * P siempre ejecuta la misma secuencia, de manera indefinida:
-     * RTAFK (vueltas configurables en 5237, 4621) -> pausa corta -> /is go
-     * -> espera 3-4 min -> /back -> verruga11 (vueltas configurables) -> pausa corta
-     * -> verruga1 (vueltas configurables en 5292, 4796) -> pausa larga -> RTAFK.
-     * Las rutas cambian exactamente en este orden, sin rutas de traslado intermedias.
-     * Todo el ciclo se repite indefinidamente hasta pulsar P.
-     * X y Z son las coordenadas horizontales (Y es la altura).
+     * P: bucle continuo RTAFK -> verruga11 -> verruga1 -> RTAFK.
+     * Las vueltas se cuentan al pasar por el punto de control configurable,
+     * siempre que antes se haya salido 12 bloques o mas de su centro.
+     * No se usan comandos ni teletransportes.
      */
     private enum SequenceStep {
         OFF,
-        FIRST_LAPS,
-        FIRST_PAUSE,
-        WAIT_BACK_COMMAND,
-        WAIT_RETURN,
-        SECOND_LAPS,
-        SECOND_PAUSE,
-        THIRD_LAPS,
-        THIRD_PAUSE
+        FIRST_LAPS, FIRST_PAUSE,
+        SECOND_LAPS, SECOND_PAUSE,
+        THIRD_LAPS, THIRD_PAUSE
     }
 
-    private static final double GATE_RADIUS = 2.0D;
-    private static final double TARGET_11_X = 5237.0D;
-    private static final double TARGET_11_Z = 4621.0D;
-    private static final double TARGET_1_X = 5292.0D;
-    private static final double TARGET_1_Z = 4796.0D;
-    private static final long TELEPORT_TIMEOUT_MS = 30_000L;
+    private static final double GATE_RESET_RADIUS = 12.0D;
 
     private SequenceStep sequenceStep = SequenceStep.OFF;
     private long sequenceDeadlineMs = 0L;
-    private long commandSentAtMs = 0L;
     private int sequenceLaps = 0;
-    private LapProgressTracker lapTracker;
+    private double previousX = 0.0D;
+    private double previousZ = 0.0D;
+    private boolean lapGateArmed = false;
     private int completedCycles = 0;
-    // Objetivos capturados al iniciar P; editar el menú no interrumpe el ciclo activo.
-    private int rtafkTargetLaps = 40;
-    private int verruga11TargetLaps = 40;
-    private int verruga1TargetLaps = 40;
 
-    private int currentTargetLaps() {
-        switch (sequenceStep) {
-            case FIRST_LAPS: return rtafkTargetLaps;
-            case SECOND_LAPS: return verruga11TargetLaps;
-            case THIRD_LAPS: return verruga1TargetLaps;
-            default: return 0;
-        }
-    }
-
+    // Valores congelados al activar P: editar el menu afecta al proximo inicio.
+    private final int[] activeLapTargets = new int[] {40, 40, 40};
+    private final int[] activePauseMinSeconds = new int[] {342, 342, 1242};
+    private final int[] activePauseMaxSeconds = new int[] {378, 378, 1278};
+    private final double[] activeGateXs = new double[] {5237.0D, 5237.0D, 5292.0D};
+    private final double[] activeGateZs = new double[] {4621.0D, 4621.0D, 4796.0D};
+    private double activeGateRadius = 2.0D;
 
     /*
      * ============================================================
@@ -225,10 +209,8 @@ public class CropRouteClient implements ClientModInitializer {
                 )
         );
 
-        ClientTickEvents.END_CLIENT_TICK.register(
-                this::onEndTick
-        );
-
+        ClientTickEvents.END_CLIENT_TICK.register(this::onEndTick);
+        HudRenderCallback.EVENT.register((context, tickDelta) -> renderRouteHud(context));
 
     }
 
@@ -253,12 +235,8 @@ public class CropRouteClient implements ClientModInitializer {
                     client,
                     false
             );
-            // /is go y /back pueden descargar temporalmente el mundo.
-            // Mantenemos únicamente las esperas del teletransporte.
-            if (sequenceStep != SequenceStep.WAIT_BACK_COMMAND
-                    && sequenceStep != SequenceStep.WAIT_RETURN) {
-                sequenceStep = SequenceStep.OFF;
-            }
+            sequenceStep = SequenceStep.OFF;
+            sequenceDeadlineMs = 0L;
 
             recording = false;
             recordingPoints.clear();
@@ -304,12 +282,10 @@ public class CropRouteClient implements ClientModInitializer {
 
         runSelectedRoute(client);
 
-        if (isSequenceRouteStep()) {
-            if (playing) {
-                checkSequenceProgress(client);
-            } else {
-                abortSequence(client, "P: ruta detenida inesperadamente");
-            }
+        if (playing && sequenceStep != SequenceStep.OFF) {
+            checkSequenceProgress(client);
+        } else if (!playing && isSequenceRouteStep()) {
+            abortSequence(client, "Recorrido interrumpido");
         }
     }
 
@@ -399,15 +375,14 @@ public class CropRouteClient implements ClientModInitializer {
      * ============================================================
      * P - SECUENCIA INFINITA
      * ============================================================
-     * Se inicia con RTAFK y contabiliza las vueltas configuradas antes de cambiar de ruta.
-     * No se usa RTAFK como ruta de traslado intermedia.
+     * RTAFK -> pausa -> verruga11 -> pausa -> verruga1 -> pausa -> repetir.
+     * Los parametros de vueltas y pausas se guardan en p-settings.json.
      */
-
     private void startSequence(MinecraftClient client) {
-        for (String name : new String[] {"verruga11", "verruga1", "RTAFK"}) {
+        for (String name : new String[] {"RTAFK", "verruga11", "verruga1"}) {
             RouteData route = findRouteByName(name);
             if (route == null || route.points == null || route.points.size() < 4) {
-                showActionBar("P: falta una ruta valida: " + name);
+                showActionBar("P: falta la ruta " + name);
                 return;
             }
             if (route.dimension != null && !route.dimension.isBlank()
@@ -416,23 +391,27 @@ public class CropRouteClient implements ClientModInitializer {
                 return;
             }
         }
-        // Siempre seleccionar RTAFK. No se comprueba la distancia entre rutas:
-        // el usuario se encarga de la separacion o del traslado en el servidor.
+
+        for (int i = 0; i < 3; i++) {
+            activeLapTargets[i] = RouteManager.getSequenceLaps(i);
+            activePauseMinSeconds[i] = RouteManager.getPauseMinimumSeconds(i);
+            activePauseMaxSeconds[i] = RouteManager.getPauseMaximumSeconds(i);
+            activeGateXs[i] = RouteManager.getGateX(i);
+            activeGateZs[i] = RouteManager.getGateZ(i);
+        }
+        activeGateRadius = RouteManager.getGateRadius();
         if (recording) {
             recording = false;
             recordingPoints.clear();
         }
         completedCycles = 0;
-        rtafkTargetLaps = RouteManager.getRtafkLaps();
-        verruga11TargetLaps = RouteManager.getVerruga11Laps();
-        verruga1TargetLaps = RouteManager.getVerruga1Laps();
         sequenceStep = SequenceStep.FIRST_LAPS;
         if (!switchAndPlay(client, "RTAFK")) {
             abortSequence(client, "P: no se pudo iniciar RTAFK");
             return;
         }
         resetLapCounter(client);
-        showActionBar("P ACTIVADO: RTAFK 0/" + rtafkTargetLaps + " vueltas | ciclo infinito");
+        showActionBar("P ACTIVADO: RTAFK 0/" + activeLapTargets[0] + " vueltas");
     }
 
     private RouteData findRouteByName(String name) {
@@ -451,14 +430,13 @@ public class CropRouteClient implements ClientModInitializer {
         }
         stopPlayback(client, false);
         RouteManager.select(route.id);
-        startPlayback(client, false); // P nunca inicia ni reinicia temporizadores.
+        startPlayback(client, false); // Sin temporizador: exclusivo de O.
         return playing;
     }
 
     private void abortSequence(MinecraftClient client, String message) {
         sequenceStep = SequenceStep.OFF;
         sequenceDeadlineMs = 0L;
-        commandSentAtMs = 0L;
         stopPlayback(client, false);
         showActionBar(message);
     }
@@ -469,103 +447,68 @@ public class CropRouteClient implements ClientModInitializer {
                 || sequenceStep == SequenceStep.THIRD_LAPS;
     }
 
-    private static long randomShortPauseMs() {
-        // 5.7-6.3 minutos = 342-378 segundos.
-        return ThreadLocalRandom.current().nextLong(342_000L, 378_001L);
+    private int currentSectionIndex() {
+        if (sequenceStep == SequenceStep.FIRST_LAPS) return 0;
+        if (sequenceStep == SequenceStep.SECOND_LAPS) return 1;
+        return 2;
     }
 
-    private static long randomLongPauseMs() {
-        // 20.7-21.3 minutos = 1242-1278 segundos.
-        return ThreadLocalRandom.current().nextLong(1_242_000L, 1_278_001L);
+    private static String sequenceName(int section) {
+        return new String[] {"RTAFK", "verruga11", "verruga1"}[section];
     }
 
-    private static long randomIslandMs() {
-        // 3-4 minutos entre /is go y /back.
-        return ThreadLocalRandom.current().nextLong(180_000L, 240_001L);
-    }
-
-    private static boolean isNear(MinecraftClient client, double x, double z, double radius) {
-        double dx = client.player.getX() - x;
-        double dz = client.player.getZ() - z;
-        return dx * dx + dz * dz <= radius * radius;
+    private long randomPauseMs(int section) {
+        long min = activePauseMinSeconds[section];
+        long max = activePauseMaxSeconds[section];
+        return ThreadLocalRandom.current().nextLong(min, max + 1L) * 1000L;
     }
 
     private void resetLapCounter(MinecraftClient client) {
         sequenceLaps = 0;
-        RouteData route = RouteManager.getSelectedRoute();
-        if (route == null || route.points == null || route.points.size() < 4) {
-            lapTracker = null;
-            return;
-        }
-        double targetX = sequenceStep == SequenceStep.THIRD_LAPS ? TARGET_1_X : TARGET_11_X;
-        double targetZ = sequenceStep == SequenceStep.THIRD_LAPS ? TARGET_1_Z : TARGET_11_Z;
-        lapTracker = new LapProgressTracker(route.points, targetX, targetZ, GATE_RADIUS,
-                progressSegment, progressT, client.player.getX(), client.player.getZ());
+        previousX = client.player.getX();
+        previousZ = client.player.getZ();
+        lapGateArmed = false;
     }
 
-    private void enterPause(MinecraftClient client, SequenceStep pauseStage, String label,
-                            long durationMs) {
+    private void enterPause(MinecraftClient client, SequenceStep pauseStage,
+                            int section) {
+        long durationMs = randomPauseMs(section);
         stopPlayback(client, false);
         sequenceStep = pauseStage;
         sequenceDeadlineMs = System.currentTimeMillis() + durationMs;
-        long seconds = Math.round(durationMs / 1000.0D);
-        showActionBar(label + " | pausa: " + (seconds / 60) + "m " + (seconds % 60) + "s");
-    }
-
-    private void sendSequenceCommand(MinecraftClient client, String command) {
-        // Se envia el comando sin '/' segun la API de Minecraft.
-        client.player.networkHandler.sendChatCommand(command);
-        showActionBar("P: comando enviado /" + command);
+        long seconds = durationMs / 1000L;
+        String name = sequenceName(section);
+        showActionBar("P: " + name + " completada | pausa "
+                + (seconds / 60) + "m " + (seconds % 60) + "s");
+        showChatMessage("[Crop Route] " + name + ": " + activeLapTargets[section]
+                + " vueltas completas. Pausa: " + (seconds / 60)
+                + "m " + (seconds % 60) + "s.");
     }
 
     private void tickSequence(MinecraftClient client) {
-        if (client.currentScreen != null) {
-            // No enviamos comandos con inventario o chat abiertos.
-            return;
-        }
+        if (client.currentScreen != null) return;
         long now = System.currentTimeMillis();
         switch (sequenceStep) {
             case FIRST_PAUSE:
                 if (now >= sequenceDeadlineMs) {
-                    sendSequenceCommand(client, "is go");
-                    sequenceStep = SequenceStep.WAIT_BACK_COMMAND;
-                    sequenceDeadlineMs = now + randomIslandMs();
-                    showActionBar("P: esperando 3-4 min antes de /back");
-                }
-                break;
-            case WAIT_BACK_COMMAND:
-                if (now >= sequenceDeadlineMs) {
-                    sendSequenceCommand(client, "back");
-                    commandSentAtMs = now;
-                    sequenceDeadlineMs = now + TELEPORT_TIMEOUT_MS;
-                    sequenceStep = SequenceStep.WAIT_RETURN;
-                }
-                break;
-            case WAIT_RETURN:
-                // No se reinicia la ruta si /back deja al jugador lejos.
-                if (now - commandSentAtMs >= 1500L
-                        && "minecraft:overworld".equals(currentDimension(client))
-                        && isNear(client, TARGET_11_X, TARGET_11_Z, 15.0D)) {
                     sequenceStep = SequenceStep.SECOND_LAPS;
                     if (!switchAndPlay(client, "verruga11")) {
-                        abortSequence(client, "P: error al reactivar verruga11");
+                        abortSequence(client, "P: error al activar verruga11");
                         break;
                     }
                     resetLapCounter(client);
-                    showActionBar("P: regreso confirmado | verruga11: 0/" + verruga11TargetLaps);
-                } else if (now >= sequenceDeadlineMs) {
-                    abortSequence(client, "P: /back no regreso cerca de verruga11");
+                    showActionBar("P: verruga11 | 0/" + activeLapTargets[1]);
                 }
                 break;
             case SECOND_PAUSE:
                 if (now >= sequenceDeadlineMs) {
                     sequenceStep = SequenceStep.THIRD_LAPS;
                     if (!switchAndPlay(client, "verruga1")) {
-                        abortSequence(client, "P: fallo al activar verruga1");
+                        abortSequence(client, "P: error al activar verruga1");
                         break;
                     }
                     resetLapCounter(client);
-                    showActionBar("P: verruga1 | 0/" + verruga1TargetLaps + " vueltas");
+                    showActionBar("P: verruga1 | 0/" + activeLapTargets[2]);
                 }
                 break;
             case THIRD_PAUSE:
@@ -573,12 +516,12 @@ public class CropRouteClient implements ClientModInitializer {
                     completedCycles++;
                     sequenceStep = SequenceStep.FIRST_LAPS;
                     if (!switchAndPlay(client, "RTAFK")) {
-                        abortSequence(client, "P: no se pudo reiniciar RTAFK");
+                        abortSequence(client, "P: error al reiniciar RTAFK");
                         break;
                     }
                     resetLapCounter(client);
                     showActionBar("P: ciclo " + completedCycles
-                            + " completado. RTAFK | 0/" + rtafkTargetLaps + " vueltas");
+                            + " terminado. RTAFK 0/" + activeLapTargets[0]);
                 }
                 break;
             default:
@@ -586,46 +529,60 @@ public class CropRouteClient implements ClientModInitializer {
         }
     }
 
+    // Minima distancia horizontal entre un punto y el segmento recorrido en un tick.
+    // Evita perder una vuelta al atravesar el radio de 2 bloques entre dos ticks.
+    private static double distanceToTickSegment(double ax, double az, double bx,
+                                                 double bz, double cx, double cz) {
+        double dx = bx - ax;
+        double dz = bz - az;
+        double lengthSquared = dx * dx + dz * dz;
+        if (lengthSquared < 1.0e-9D) return Math.hypot(cx - ax, cz - az);
+        double t = Math.max(0.0D, Math.min(1.0D,
+                ((cx - ax) * dx + (cz - az) * dz) / lengthSquared));
+        return Math.hypot(cx - (ax + t * dx), cz - (az + t * dz));
+    }
+
     private void checkSequenceProgress(MinecraftClient client) {
-        if (sequenceStep != SequenceStep.FIRST_LAPS
-                && sequenceStep != SequenceStep.SECOND_LAPS
-                && sequenceStep != SequenceStep.THIRD_LAPS) {
-            return;
-        }
-        String expectedName = sequenceStep == SequenceStep.FIRST_LAPS
-                ? "RTAFK" : (sequenceStep == SequenceStep.SECOND_LAPS
-                ? "verruga11" : "verruga1");
+        if (!isSequenceRouteStep()) return;
+
+        int section = currentSectionIndex();
+        String expectedName = sequenceName(section);
         RouteData route = RouteManager.getSelectedRoute();
         if (route == null || !expectedName.equalsIgnoreCase(route.name)) {
             abortSequence(client, "P: se cambio manualmente la ruta activa");
             return;
         }
 
-        if (lapTracker == null) {
-            abortSequence(client, "P: no se pudo iniciar el contador de vueltas");
+        double x = client.player.getX();
+        double z = client.player.getZ();
+        double oldX = previousX;
+        double oldZ = previousZ;
+        double movement = Math.hypot(x - oldX, z - oldZ);
+        previousX = x;
+        previousZ = z;
+        if (movement > 5.0D) {
+            // Un teletransporte no debe contar como cruce del punto de control.
+            lapGateArmed = false;
             return;
         }
-        // La vuelta se mide por una reproducción completa de los segmentos
-        // de la ruta guardada. El punto X/Z, con margen de 2 bloques,
-        // confirma que se pasó por la zona sin exigir coordenadas exactas.
-        if (lapTracker.update(progressSegment, progressT,
-                client.player.getX(), client.player.getZ())) {
+
+        double targetX = activeGateXs[section];
+        double targetZ = activeGateZs[section];
+        double gateDistance = Math.hypot(x - targetX, z - targetZ);
+        // Histeresis: alejarse antes de contar otro cruce del mismo punto.
+        if (gateDistance >= Math.max(GATE_RESET_RADIUS, activeGateRadius + 5.0D)) {
+            lapGateArmed = true;
+        }
+
+        if (lapGateArmed && distanceToTickSegment(oldX, oldZ, x, z,
+                targetX, targetZ) <= activeGateRadius) {
             sequenceLaps++;
-            if (sequenceLaps == 1 || sequenceLaps % 5 == 0
-                    || sequenceLaps == currentTargetLaps()) {
-                showActionBar("P: " + expectedName + " " + sequenceLaps + "/" + currentTargetLaps());
-            }
-            if (sequenceLaps >= currentTargetLaps()) {
-                if (sequenceStep == SequenceStep.FIRST_LAPS) {
-                    enterPause(client, SequenceStep.FIRST_PAUSE,
-                            "P: RTAFK " + rtafkTargetLaps + " vueltas", randomShortPauseMs());
-                } else if (sequenceStep == SequenceStep.SECOND_LAPS) {
-                    enterPause(client, SequenceStep.SECOND_PAUSE,
-                            "P: verruga11 " + verruga11TargetLaps + " vueltas", randomShortPauseMs());
-                } else {
-                    enterPause(client, SequenceStep.THIRD_PAUSE,
-                            "P: verruga1 " + verruga1TargetLaps + " vueltas", randomLongPauseMs());
-                }
+            lapGateArmed = false;
+            if (sequenceLaps >= activeLapTargets[section]) {
+                SequenceStep pauseStage = section == 0 ? SequenceStep.FIRST_PAUSE
+                        : section == 1 ? SequenceStep.SECOND_PAUSE
+                        : SequenceStep.THIRD_PAUSE;
+                enterPause(client, pauseStage, section);
             }
         }
     }
@@ -1906,6 +1863,69 @@ public class CropRouteClient implements ClientModInitializer {
                     true
             );
         }
+    }
+
+    /* HUD discreto en la esquina superior izquierda, independiente del chat/hotbar. */
+    private void renderRouteHud(DrawContext context) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null || client.world == null || client.currentScreen != null) return;
+        boolean modeP = sequenceStep != SequenceStep.OFF;
+        if (!modeP && !playing) return;
+
+        List<String> lines = new ArrayList<>();
+        lines.add("CROP ROUTE  |  " + (modeP ? "MODO P" : "MODO O"));
+        RouteData route = RouteManager.getSelectedRoute();
+        lines.add("Ruta: " + (route != null ? route.name : "ninguna"));
+        if (modeP) {
+            int section = hudSectionIndex();
+            boolean paused = !isSequenceRouteStep();
+            lines.add("Vueltas: " + sequenceLaps + " / " + activeLapTargets[section]);
+            lines.add("Coord.: X " + hudNumber(activeGateXs[section])
+                    + "  Z " + hudNumber(activeGateZs[section]));
+            lines.add("Tolerancia: " + hudNumber(activeGateRadius) + " bloques");
+            lines.add("Estado: " + (paused ? "En pausa" : "En recorrido"));
+            if (paused) {
+                long left = Math.max(0L, (sequenceDeadlineMs - System.currentTimeMillis() + 999L) / 1000L);
+                lines.add("Restante: " + String.format(java.util.Locale.ROOT,
+                        "%02d:%02d", left / 60L, left % 60L));
+                lines.add("Siguiente: " + sequenceName((section + 1) % 3));
+            } else {
+                lines.add("Siguiente: pausa");
+            }
+        } else {
+            lines.add("Estado: En recorrido");
+            if (routeEndTime > 0L) {
+                long left = Math.max(0L, (routeEndTime - System.currentTimeMillis() + 999L) / 1000L);
+                lines.add("Temporizador: " + (left / 3600L) + "h "
+                        + ((left % 3600L) / 60L) + "m " + (left % 60L) + "s");
+            }
+        }
+        int maxTextWidth = 0;
+        for (String line : lines) maxTextWidth = Math.max(maxTextWidth, client.textRenderer.getWidth(line));
+        int left = 6, top = 6, lineHeight = 12;
+        context.fill(left, top, left + maxTextWidth + 16,
+                top + lines.size() * lineHeight + 12, 0xA9000000);
+        for (int i = 0; i < lines.size(); i++) {
+            int color = i == 0 ? 0x80EDFF : 0xFFFFFF;
+            context.drawTextWithShadow(client.textRenderer, Text.literal(lines.get(i)),
+                    left + 8, top + 7 + i * lineHeight, color);
+        }
+    }
+
+    private int hudSectionIndex() {
+        switch (sequenceStep) {
+            case FIRST_LAPS:
+            case FIRST_PAUSE: return 0;
+            case SECOND_LAPS:
+            case SECOND_PAUSE: return 1;
+            case THIRD_LAPS:
+            case THIRD_PAUSE: return 2;
+            default: return 0;
+        }
+    }
+
+    private static String hudNumber(double value) {
+        return String.format(java.util.Locale.ROOT, "%.2f", value);
     }
 
     /*
