@@ -19,75 +19,127 @@ public final class RouteManager {
             FabricLoader.getInstance().getConfigDir().resolve("crop-route");
     private static final Path ROUTES_FILE = CONFIG_DIR.resolve("routes.json");
     private static final Path TIMER_FILE = CONFIG_DIR.resolve("timer.json");
-    private static final Path LAPS_FILE = CONFIG_DIR.resolve("vueltas-p.json");
+    private static final Path P_SETTINGS_FILE = CONFIG_DIR.resolve("p-settings.json");
+
+    // orden fijo: RTAFK, verruga11, verruga1
+    private static PSettings pSettings = new PSettings();
+    private static final class PSettings {
+        int[] laps = {40, 40, 40};
+        int[] minSeconds = {342, 342, 1242};
+        int[] maxSeconds = {378, 378, 1278};
+        // X / Z de los puntos de conteo. Compartir punto entre rutas esta permitido.
+        double[] gateX = {5237.0D, 5237.0D, 5292.0D};
+        double[] gateZ = {4621.0D, 4621.0D, 4796.0D};
+        double gateRadius = 2.0D;
+    }
+
+    private static boolean validPSettings(PSettings settings) {
+        if (settings == null || settings.laps == null || settings.minSeconds == null
+                || settings.maxSeconds == null || settings.laps.length != 3
+                || settings.minSeconds.length != 3 || settings.maxSeconds.length != 3
+                || settings.gateX == null || settings.gateX.length != 3
+                || settings.gateZ == null || settings.gateZ.length != 3
+                || !Double.isFinite(settings.gateRadius)
+                || settings.gateRadius < 0.25D || settings.gateRadius > 8.0D) return false;
+        for (int i = 0; i < 3; i++) {
+            if (!Double.isFinite(settings.gateX[i]) || !Double.isFinite(settings.gateZ[i])
+                    || Math.abs(settings.gateX[i]) > 30000000D
+                    || Math.abs(settings.gateZ[i]) > 30000000D) return false;
+            if (settings.laps[i] < 1 || settings.laps[i] > 100000
+                    || settings.minSeconds[i] < 0 || settings.maxSeconds[i] < 0
+                    || settings.minSeconds[i] > settings.maxSeconds[i]
+                    || settings.maxSeconds[i] > 599999) return false;
+        }
+        return true;
+    }
+
+    public static int getSequenceLaps(int section) {
+        return pSettings.laps[section];
+    }
+    public static int getPauseMinimumSeconds(int section) {
+        return pSettings.minSeconds[section];
+    }
+    public static int getPauseMaximumSeconds(int section) {
+        return pSettings.maxSeconds[section];
+    }
+    public static double getGateX(int section) { return pSettings.gateX[section]; }
+    public static double getGateZ(int section) { return pSettings.gateZ[section]; }
+    public static double getGateRadius() { return pSettings.gateRadius; }
+
+    private static PSettings copyPSettings() {
+        PSettings result = new PSettings();
+        result.laps = pSettings.laps.clone();
+        result.minSeconds = pSettings.minSeconds.clone();
+        result.maxSeconds = pSettings.maxSeconds.clone();
+        result.gateX = pSettings.gateX.clone();
+        result.gateZ = pSettings.gateZ.clone();
+        result.gateRadius = pSettings.gateRadius;
+        return result;
+    }
+
+    public static void setSequenceCoordinates(double[] xs, double[] zs, double radius) {
+        if (xs == null || zs == null || xs.length != 3 || zs.length != 3)
+            throw new IllegalArgumentException("Se requieren las 3 rutas");
+        PSettings updated = copyPSettings();
+        updated.gateX = xs.clone();
+        updated.gateZ = zs.clone();
+        updated.gateRadius = radius;
+        if (!validPSettings(updated))
+            throw new IllegalArgumentException("Coordenadas o tolerancia invalidas");
+        pSettings = updated;
+        savePSettings();
+    }
+
+    public static void setSequenceLaps(int[] laps) {
+        if (laps == null || laps.length != 3) throw new IllegalArgumentException("Se requieren 3 rutas");
+        PSettings updated = copyPSettings();
+        updated.laps = laps.clone();
+        if (!validPSettings(updated)) throw new IllegalArgumentException("Vueltas: 1 a 100000");
+        pSettings = updated;
+        savePSettings();
+    }
+    public static void setSequencePauses(int[] minimums, int[] maximums) {
+        if (minimums == null || maximums == null || minimums.length != 3
+                || maximums.length != 3) throw new IllegalArgumentException("Se requieren 3 rutas");
+        PSettings updated = copyPSettings();
+        updated.minSeconds = minimums.clone();
+        updated.maxSeconds = maximums.clone();
+        if (!validPSettings(updated)) throw new IllegalArgumentException("Intervalos invalidos");
+        pSettings = updated;
+        savePSettings();
+    }
+    private static void loadPSettings() {
+        pSettings = new PSettings();
+        if (!Files.exists(P_SETTINGS_FILE)) return;
+        try (Reader reader = Files.newBufferedReader(P_SETTINGS_FILE)) {
+            PSettings loaded = GSON.fromJson(reader, PSettings.class);
+            if (loaded != null) {
+                // Migrar p-settings.json de la version 1.3.0 sin perder vueltas ni pausas.
+                if (loaded.gateX == null) loaded.gateX = new double[] {5237, 5237, 5292};
+                if (loaded.gateZ == null) loaded.gateZ = new double[] {4621, 4621, 4796};
+                if (loaded.gateRadius == 0.0D) loaded.gateRadius = 2.0D;
+                if (validPSettings(loaded)) pSettings = loaded;
+            }
+        } catch (Exception e) {
+            System.err.println("[CropRoute] No se pudo leer p-settings.json: " + e.getMessage());
+        }
+    }
+    private static void savePSettings() {
+        try {
+            Files.createDirectories(CONFIG_DIR);
+            try (Writer writer = Files.newBufferedWriter(P_SETTINGS_FILE)) {
+                GSON.toJson(pSettings, writer);
+            }
+        } catch (IOException e) {
+            System.err.println("[CropRoute] No se pudo guardar p-settings.json: " + e.getMessage());
+        }
+    }
+
 
     private static RouteStore store = new RouteStore();
 
     private static int routeTimerHours = 3;
     private static int routeTimerMinutes = 0;
-
-    // Configuración independiente de P; valores por defecto del ciclo original.
-    private static int rtafkLaps = 40;
-    private static int verruga11Laps = 40;
-    private static int verruga1Laps = 40;
-
-    public static int getRtafkLaps() { return rtafkLaps; }
-    public static int getVerruga11Laps() { return verruga11Laps; }
-    public static int getVerruga1Laps() { return verruga1Laps; }
-
-    public static void setSequenceLaps(int rtafk, int verruga11, int verruga1) {
-        if (!validLaps(rtafk) || !validLaps(verruga11) || !validLaps(verruga1)) {
-            throw new IllegalArgumentException("Las vueltas deben estar entre 1 y 9999");
-        }
-        rtafkLaps = rtafk;
-        verruga11Laps = verruga11;
-        verruga1Laps = verruga1;
-        saveSequenceLaps();
-    }
-
-    private static boolean validLaps(int amount) {
-        return amount >= 1 && amount <= 9999;
-    }
-
-    private static final class SequenceLapsSettings {
-        int RTAFK = 40;
-        int verruga11 = 40;
-        int verruga1 = 40;
-    }
-
-    private static void loadSequenceLaps() {
-        rtafkLaps = 40;
-        verruga11Laps = 40;
-        verruga1Laps = 40;
-        if (!Files.exists(LAPS_FILE)) return;
-        try (Reader reader = Files.newBufferedReader(LAPS_FILE)) {
-            SequenceLapsSettings value = GSON.fromJson(reader, SequenceLapsSettings.class);
-            if (value != null && validLaps(value.RTAFK)
-                    && validLaps(value.verruga11) && validLaps(value.verruga1)) {
-                rtafkLaps = value.RTAFK;
-                verruga11Laps = value.verruga11;
-                verruga1Laps = value.verruga1;
-            }
-        } catch (Exception e) {
-            System.err.println("[CropRoute] Error leyendo vueltas P: " + e.getMessage());
-        }
-    }
-
-    private static void saveSequenceLaps() {
-        try {
-            Files.createDirectories(CONFIG_DIR);
-            SequenceLapsSettings value = new SequenceLapsSettings();
-            value.RTAFK = rtafkLaps;
-            value.verruga11 = verruga11Laps;
-            value.verruga1 = verruga1Laps;
-            try (Writer writer = Files.newBufferedWriter(LAPS_FILE)) {
-                GSON.toJson(value, writer);
-            }
-        } catch (IOException e) {
-            System.err.println("[CropRoute] Error guardando vueltas P: " + e.getMessage());
-        }
-    }
-
 
     public static int getRouteTimerHours() {
         return routeTimerHours;
@@ -153,7 +205,7 @@ public final class RouteManager {
         try {
             Files.createDirectories(CONFIG_DIR);
             loadTimer();
-            loadSequenceLaps();
+            loadPSettings();
 
             if (!Files.exists(ROUTES_FILE)) {
                 store = new RouteStore();
