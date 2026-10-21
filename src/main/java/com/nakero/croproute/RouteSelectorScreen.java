@@ -23,13 +23,15 @@ public class RouteSelectorScreen extends Screen {
     @Override
     protected void init() {
         List<RouteData> routes = RouteManager.getRoutesNewestFirst();
-        int panelWidth = Math.min(330, width - 30);
-        int x = (width - panelWidth) / 2;
-        int startY = Math.max(50, height / 2 - 92);
-        // Reservar espacio para los botones, incluso con una escala de GUI grande.
-        int routesPerPage = Math.max(1, Math.min(6, (height - startY - 142) / 24));
+        // Reducir las filas visibles en resoluciones pequenas, sin ocultar botones.
+        int routesPerPage = height >= 390 ? 6 : height >= 330 ? 4 : height >= 280 ? 3 : 2;
         int maxPage = Math.max(0, (routes.size() - 1) / routesPerPage);
         page = Math.min(page, maxPage);
+
+        int panelWidth = Math.min(330, width - 30);
+        int x = (width - panelWidth) / 2;
+        int startY = height < 280 ? 30 : Math.max(45,
+                (height - (routesPerPage * 24 + 115)) / 2);
 
         int from = page * routesPerPage;
         int to = Math.min(routes.size(), from + routesPerPage);
@@ -102,31 +104,18 @@ public class RouteSelectorScreen extends Screen {
         addDrawableChild(deleteButton);
 
         addDrawableChild(ButtonWidget.builder(
-                Text.literal("Temporizador"),
+                Text.literal("Configuración"),
                 button -> {
-                    if (client != null) {
-                        client.setScreen(new TimerConfigScreen());
-                    }
+                    if (client != null) client.setScreen(new ConfigurationScreen());
                 }
         ).dimensions(x + (panelWidth - 180) / 2, bottomY + 54, 180, 20).build());
 
         addDrawableChild(ButtonWidget.builder(
-                Text.literal("Vueltas P"),
-                button -> {
-                    if (client != null) {
-                        client.setScreen(new LapsConfigScreen());
-                    }
-                }
-        ).dimensions(x + (panelWidth - 180) / 2, bottomY + 81, 180, 20).build());
-
-        addDrawableChild(ButtonWidget.builder(
                 Text.literal("Cerrar"),
                 button -> {
-                    if (client != null) {
-                        client.setScreen(null);
-                    }
+                    if (client != null) client.setScreen(null);
                 }
-        ).dimensions(x + (panelWidth - 90) / 2, bottomY + 108, 90, 20).build());
+        ).dimensions(x + (panelWidth - 90) / 2, bottomY + 81, 90, 20).build());
     }
 
     @Override
@@ -166,6 +155,37 @@ public class RouteSelectorScreen extends Screen {
         }
 
         super.render(context, mouseX, mouseY, delta);
+    }
+
+    private static class ConfigurationScreen extends Screen {
+        ConfigurationScreen() { super(Text.literal("Configuración")); }
+
+        @Override
+        protected void init() {
+            String[] labels = {"Temporizador", "Vueltas P", "Pausas P", "Coordenadas P", "Volver"};
+            int top = Math.max(36, (height - 5 * 28) / 2);
+            for (int i = 0; i < labels.length; i++) {
+                final int option = i;
+                addDrawableChild(ButtonWidget.builder(Text.literal(labels[i]), button -> {
+                    if (client == null) return;
+                    switch (option) {
+                        case 0: client.setScreen(new TimerConfigScreen()); break;
+                        case 1: client.setScreen(new LapsConfigScreen()); break;
+                        case 2: client.setScreen(new PausesConfigScreen()); break;
+                        case 3: client.setScreen(new CoordinatesConfigScreen()); break;
+                        default: client.setScreen(new RouteSelectorScreen()); break;
+                    }
+                }).dimensions(width / 2 - 105, top + i * 28, 210, 20).build());
+            }
+        }
+
+        @Override
+        public void render(DrawContext context, int mouseX, int mouseY, float delta) {
+            renderBackground(context, mouseX, mouseY, delta);
+            context.drawCenteredTextWithShadow(textRenderer,
+                    Text.literal("Configuración de Crop Route"), width / 2, 17, 0xFFFFFF);
+            super.render(context, mouseX, mouseY, delta);
+        }
     }
 
     private static class TimerConfigScreen extends Screen {
@@ -248,7 +268,7 @@ public class RouteSelectorScreen extends Screen {
 
                                 if (client != null) {
                                     client.setScreen(
-                                            new RouteSelectorScreen()
+                                            new ConfigurationScreen()
                                     );
                                 }
                             }
@@ -266,7 +286,7 @@ public class RouteSelectorScreen extends Screen {
                             button -> {
                                 if (client != null) {
                                     client.setScreen(
-                                            new RouteSelectorScreen()
+                                            new ConfigurationScreen()
                                     );
                                 }
                             }
@@ -280,73 +300,215 @@ public class RouteSelectorScreen extends Screen {
         }
     }
 
-
-    /** Edita el objetivo por ruta de P; no modifica ni el recorrido ni el temporizador de O. */
     private static class LapsConfigScreen extends Screen {
-        private TextFieldWidget rtafkField;
-        private TextFieldWidget verruga11Field;
-        private TextFieldWidget verruga1Field;
+        private static final String[] NAMES = {"RTAFK", "verruga11", "verruga1"};
+        private final TextFieldWidget[] fields = new TextFieldWidget[3];
 
-        protected LapsConfigScreen() {
-            super(Text.literal("Vueltas P"));
+        protected LapsConfigScreen() { super(Text.literal("Vueltas P")); }
+
+        @Override
+        protected void init() {
+            int top = Math.max(55, height / 2 - 77);
+            for (int i = 0; i < 3; i++) {
+                final int index = i;
+                fields[i] = new TextFieldWidget(textRenderer, width / 2 + 12,
+                        top + i * 34, 92, 20, Text.literal(NAMES[i]));
+                fields[i].setText(String.valueOf(RouteManager.getSequenceLaps(index)));
+                fields[i].setMaxLength(6);
+                addDrawableChild(fields[i]);
+            }
+            addDrawableChild(ButtonWidget.builder(Text.literal("Guardar vueltas"), button -> {
+                try {
+                    int[] newLaps = new int[3];
+                    for (int i = 0; i < 3; i++) newLaps[i] = Integer.parseInt(fields[i].getText().trim());
+                    RouteManager.setSequenceLaps(newLaps);
+                    CropRouteClient.showChatMessage("[Crop Route] Vueltas P guardadas: RTAFK "
+                            + newLaps[0] + " | verruga11 " + newLaps[1]
+                            + " | verruga1 " + newLaps[2] + ". Se aplicaran al reiniciar P.");
+                    if (client != null) client.setScreen(new ConfigurationScreen());
+                } catch (Exception e) {
+                    CropRouteClient.showChatMessage("[Crop Route] Vueltas invalidas. Usa enteros entre 1 y 100000.");
+                }
+            }).dimensions(width / 2 - 99, top + 115, 198, 20).build());
+            addDrawableChild(ButtonWidget.builder(Text.literal("Volver"), button -> {
+                if (client != null) client.setScreen(new ConfigurationScreen());
+            }).dimensions(width / 2 - 50, top + 142, 100, 20).build());
         }
 
-        private int top() {
-            return Math.max(30, height / 2 - 108);
+        @Override
+        public void render(DrawContext context, int mouseX, int mouseY, float delta) {
+            renderBackground(context, mouseX, mouseY, delta);
+            context.drawCenteredTextWithShadow(textRenderer, Text.literal("Vueltas P (1 a 100000)"),
+                    width / 2, 27, 0xFFFFFF);
+            int top = Math.max(55, height / 2 - 77);
+            for (int i = 0; i < 3; i++) {
+                context.drawTextWithShadow(textRenderer, Text.literal(NAMES[i]),
+                        width / 2 - 105, top + i * 34 + 6, 0xD0D0D0);
+            }
+            super.render(context, mouseX, mouseY, delta);
+        }
+    }
+
+    private static class PausesConfigScreen extends Screen {
+        private static final String[] NAMES = {"RTAFK", "verruga11", "verruga1"};
+        private final TextFieldWidget[] minFields = new TextFieldWidget[3];
+        private final TextFieldWidget[] maxFields = new TextFieldWidget[3];
+        private String error = "";
+
+        protected PausesConfigScreen() { super(Text.literal("Pausas P")); }
+
+        private static String asClock(int seconds) {
+            return String.format(java.util.Locale.ROOT, "%02d:%02d", seconds / 60, seconds % 60);
+        }
+
+        // Valores en minutos:segundos. Se permiten de 00:00 a 9999:59.
+        private static int parseClock(String value) {
+            String[] parts = value.trim().split(":", -1);
+            if (parts.length != 2 || !parts[0].matches("[0-9]{1,4}")
+                    || !parts[1].matches("[0-9]{1,2}")) {
+                throw new IllegalArgumentException("Usa MM:SS");
+            }
+            int minutes = Integer.parseInt(parts[0]);
+            int seconds = Integer.parseInt(parts[1]);
+            if (seconds > 59) throw new IllegalArgumentException("Segundos: 0-59");
+            return minutes * 60 + seconds;
+        }
+
+        @Override
+        protected void init() {
+            int top = Math.max(69, height / 2 - 70);
+            for (int i = 0; i < 3; i++) {
+                minFields[i] = new TextFieldWidget(textRenderer, width / 2 - 13,
+                        top + i * 30, 69, 20, Text.literal("Minimo"));
+                maxFields[i] = new TextFieldWidget(textRenderer, width / 2 + 66,
+                        top + i * 30, 69, 20, Text.literal("Maximo"));
+                minFields[i].setMaxLength(7);
+                maxFields[i].setMaxLength(7);
+                minFields[i].setText(asClock(RouteManager.getPauseMinimumSeconds(i)));
+                maxFields[i].setText(asClock(RouteManager.getPauseMaximumSeconds(i)));
+                addDrawableChild(minFields[i]);
+                addDrawableChild(maxFields[i]);
+            }
+            addDrawableChild(ButtonWidget.builder(Text.literal("Guardar pausas"), button -> {
+                try {
+                    int[] minimums = new int[3];
+                    int[] maximums = new int[3];
+                    for (int i = 0; i < 3; i++) {
+                        minimums[i] = parseClock(minFields[i].getText());
+                        maximums[i] = parseClock(maxFields[i].getText());
+                    }
+                    RouteManager.setSequencePauses(minimums, maximums);
+                    CropRouteClient.showChatMessage("[Crop Route] Pausas P guardadas: RTAFK "
+                            + asClock(minimums[0]) + "-" + asClock(maximums[0])
+                            + " | verruga11 " + asClock(minimums[1]) + "-" + asClock(maximums[1])
+                            + " | verruga1 " + asClock(minimums[2]) + "-" + asClock(maximums[2])
+                            + ". Se aplicaran al reiniciar P.");
+                    if (client != null) client.setScreen(new ConfigurationScreen());
+                } catch (Exception e) {
+                    error = "Formato MM:SS; minimo no puede superar maximo.";
+                    CropRouteClient.showChatMessage("[Crop Route] " + error);
+                }
+            }).dimensions(width / 2 - 100, top + 101, 200, 20).build());
+            addDrawableChild(ButtonWidget.builder(Text.literal("Volver"), button -> {
+                if (client != null) client.setScreen(new ConfigurationScreen());
+            }).dimensions(width / 2 - 50, top + 128, 100, 20).build());
         }
 
         @Override
         public void render(DrawContext context, int mouseX, int mouseY, float delta) {
             renderBackground(context, mouseX, mouseY, delta);
             context.drawCenteredTextWithShadow(textRenderer,
-                    Text.literal("Vueltas por ruta (solo tecla P)"), width / 2, top() - 15, 0xFFFFFF);
-            context.drawCenteredTextWithShadow(textRenderer,
-                    Text.literal("RTAFK"), width / 2, top() + 2, 0xCFCFCF);
-            context.drawCenteredTextWithShadow(textRenderer,
-                    Text.literal("verruga11"), width / 2, top() + 52, 0xCFCFCF);
-            context.drawCenteredTextWithShadow(textRenderer,
-                    Text.literal("verruga1"), width / 2, top() + 102, 0xCFCFCF);
+                    Text.literal("Pausas P (minutos:segundos)"), width / 2, 23, 0xFFFFFF);
+            int top = Math.max(69, height / 2 - 70);
+            context.drawCenteredTextWithShadow(textRenderer, Text.literal("Minimo       Maximo"),
+                    width / 2 + 48, top - 17, 0xB0B0B0);
+            for (int i = 0; i < 3; i++) {
+                context.drawTextWithShadow(textRenderer, Text.literal(NAMES[i]),
+                        width / 2 - 122, top + i * 30 + 6, 0xD0D0D0);
+            }
+            if (!error.isEmpty()) context.drawCenteredTextWithShadow(textRenderer,
+                    Text.literal(error), width / 2, top + 160, 0xFF7777);
             super.render(context, mouseX, mouseY, delta);
+        }
+    }
+
+    private static class CoordinatesConfigScreen extends Screen {
+        private static final String[] NAMES = {"RTAFK", "verruga11", "verruga1"};
+        private final TextFieldWidget[] xFields = new TextFieldWidget[3];
+        private final TextFieldWidget[] zFields = new TextFieldWidget[3];
+        private TextFieldWidget radiusField;
+        private String error = "";
+
+        CoordinatesConfigScreen() { super(Text.literal("Coordenadas P")); }
+
+        private int formTop() { return Math.max(42, (height - 196) / 2); }
+
+        private static double parseNumber(String raw) {
+            return Double.parseDouble(raw.trim().replace(',', '.'));
         }
 
         @Override
         protected void init() {
-            int y = top();
-            rtafkField = new TextFieldWidget(textRenderer, width / 2 - 60, y + 17,
-                    120, 20, Text.literal("RTAFK"));
-            verruga11Field = new TextFieldWidget(textRenderer, width / 2 - 60, y + 67,
-                    120, 20, Text.literal("verruga11"));
-            verruga1Field = new TextFieldWidget(textRenderer, width / 2 - 60, y + 117,
-                    120, 20, Text.literal("verruga1"));
-            for (TextFieldWidget field : new TextFieldWidget[] {
-                    rtafkField, verruga11Field, verruga1Field }) {
-                field.setMaxLength(4);
-                field.setTextPredicate(value -> value.matches("[0-9]*"));
-                addDrawableChild(field);
+            int top = formTop();
+            for (int i = 0; i < 3; i++) {
+                xFields[i] = new TextFieldWidget(textRenderer, width / 2 - 15,
+                        top + i * 27, 80, 20, Text.literal("X"));
+                zFields[i] = new TextFieldWidget(textRenderer, width / 2 + 72,
+                        top + i * 27, 80, 20, Text.literal("Z"));
+                xFields[i].setMaxLength(20);
+                zFields[i].setMaxLength(20);
+                xFields[i].setText(String.valueOf(RouteManager.getGateX(i)));
+                zFields[i].setText(String.valueOf(RouteManager.getGateZ(i)));
+                addDrawableChild(xFields[i]);
+                addDrawableChild(zFields[i]);
             }
-            rtafkField.setText(String.valueOf(RouteManager.getRtafkLaps()));
-            verruga11Field.setText(String.valueOf(RouteManager.getVerruga11Laps()));
-            verruga1Field.setText(String.valueOf(RouteManager.getVerruga1Laps()));
+            radiusField = new TextFieldWidget(textRenderer, width / 2 + 40,
+                    top + 86, 76, 20, Text.literal("Tolerancia"));
+            radiusField.setMaxLength(12);
+            radiusField.setText(String.valueOf(RouteManager.getGateRadius()));
+            addDrawableChild(radiusField);
 
-            addDrawableChild(ButtonWidget.builder(Text.literal("Guardar vueltas"), button -> {
+            addDrawableChild(ButtonWidget.builder(Text.literal("Guardar coordenadas"), button -> {
                 try {
-                    int rtafk = Integer.parseInt(rtafkField.getText());
-                    int verruga11 = Integer.parseInt(verruga11Field.getText());
-                    int verruga1 = Integer.parseInt(verruga1Field.getText());
-                    RouteManager.setSequenceLaps(rtafk, verruga11, verruga1);
-                    CropRouteClient.showChatMessage("[Crop Route] Vueltas P guardadas: RTAFK "
-                            + rtafk + ", verruga11 " + verruga11 + ", verruga1 " + verruga1
-                            + ". Aplican al iniciar P de nuevo.");
-                    if (client != null) client.setScreen(new RouteSelectorScreen());
-                } catch (IllegalArgumentException e) {
-                    CropRouteClient.showChatMessage(
-                            "[Crop Route] Vueltas invalidas. Usa valores entre 1 y 9999.");
+                    double[] xs = new double[3], zs = new double[3];
+                    for (int i = 0; i < 3; i++) {
+                        xs[i] = parseNumber(xFields[i].getText());
+                        zs[i] = parseNumber(zFields[i].getText());
+                    }
+                    double tolerance = parseNumber(radiusField.getText());
+                    RouteManager.setSequenceCoordinates(xs, zs, tolerance);
+                    CropRouteClient.showChatMessage("[Crop Route] Coordenadas P y tolerancia guardadas ("
+                            + tolerance + " bloques). Se aplicarán al reiniciar P.");
+                    if (client != null) client.setScreen(new ConfigurationScreen());
+                } catch (Exception e) {
+                    error = "Coordenadas invalidas o tolerancia fuera de 0.25 a 8.";
+                    CropRouteClient.showChatMessage("[Crop Route] " + error);
                 }
-            }).dimensions(width / 2 - 75, y + 155, 150, 20).build());
-
+            }).dimensions(width / 2 - 105, top + 115, 210, 20).build());
             addDrawableChild(ButtonWidget.builder(Text.literal("Volver"), button -> {
-                if (client != null) client.setScreen(new RouteSelectorScreen());
-            }).dimensions(width / 2 - 60, y + 182, 120, 20).build());
+                if (client != null) client.setScreen(new ConfigurationScreen());
+            }).dimensions(width / 2 - 50, top + 142, 100, 20).build());
+        }
+
+        @Override
+        public void render(DrawContext context, int mouseX, int mouseY, float delta) {
+            renderBackground(context, mouseX, mouseY, delta);
+            context.drawCenteredTextWithShadow(textRenderer,
+                    Text.literal("Coordenadas de vueltas P (ejes X / Z)"), width / 2, 16, 0xFFFFFF);
+            int top = formTop();
+            context.drawCenteredTextWithShadow(textRenderer, Text.literal("X                   Z"),
+                    width / 2 + 65, top - 14, 0xCCCCCC);
+            for (int i = 0; i < 3; i++) {
+                context.drawTextWithShadow(textRenderer, Text.literal(NAMES[i]),
+                        width / 2 - 122, top + i * 27 + 6, 0xEEEEEE);
+            }
+            context.drawTextWithShadow(textRenderer, Text.literal("Tolerancia:"),
+                    width / 2 - 83, top + 92, 0xEEEEEE);
+            if (!error.isEmpty()) {
+                context.drawCenteredTextWithShadow(textRenderer, Text.literal(error),
+                        width / 2, top + 168, 0xFF6666);
+            }
+            super.render(context, mouseX, mouseY, delta);
         }
     }
 
